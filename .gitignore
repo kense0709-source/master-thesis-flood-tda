@@ -1,0 +1,29 @@
+# 大容量データ（Gitに含めない）
+DEM/
+解析雨量データ/
+浸水推定図/*.zip
+
+# 出力ファイル（再生成可能なもの）
+output/dem_tiles/
+output/dem_merged.tif
+output/*.tif
+output/*.gpkg
+output/*.parquet
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 浸水推定図のGeoJSONは含める（正解ラベル、軽量）
+!浸水推定図/**/*.geojson

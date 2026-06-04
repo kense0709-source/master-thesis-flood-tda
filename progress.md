@@ -1,0 +1,99 @@
+# 修論進捗ノート
+TDA＋土地利用＋雨量によるメッシュ単位浸水予測
+
+---
+
+## フェーズ全体
+
+| Phase | 内容 | 状態 |
+|-------|------|------|
+| Phase 0 | 事前調査・流域確定 | ✅ 完了 |
+| Phase 1 | データ整備・前処理 | 🔄 進行中 |
+| Phase 2 | TDA特徴抽出 | ⬜ 未着手 |
+| Phase 3 | モデル構築・比較実験 | ⬜ 未着手 |
+| Phase 4 | 検証流域への適用・考察 | ⬜ 未着手 |
+| Phase 5 | 論文執筆 | ⬜ 未着手 |
+
+---
+
+## Phase 1 チェックリスト
+
+| # | タスク | 状態 | 備考 |
+|---|--------|------|------|
+| 1 | 浸水推定図GeoJSON取得 | ✅ 完了 | 2020第1報(1900件)・第2報(2055件)・2023(1266件) |
+| 2 | Python環境構築 | ✅ 完了 | 下記パッケージ一覧参照 |
+| 3 | DEM前処理（GML→GeoTIFF→500mメッシュ） | ✅ 完了 | 10,025メッシュ生成 |
+| 4 | 解析雨量GRIB2の読み込み・メッシュ対応づけ | ⬜ 未着手 | |
+| 5 | 浸水推定図GeoJSON → メッシュラベル化（0/1） | ⬜ 未着手 | |
+| 6 | TWI・傾斜・流向の計算 | ⬜ 未着手 | pyshedsを使用予定 |
+| 7 | Sentinel-2 NDVI/NDWI取得・メッシュ平均化 | ⬜ 未着手 | |
+
+---
+
+## 作業ログ
+
+### 2026-06-05
+
+#### ✅ 浸水推定図GeoJSON取得
+- ソース: 国土地理院（無償公開）
+- 保存先: `浸水推定図/`
+  - `2020_第1報/` — 2020年7月8日, 1,900 features (Polygon)
+  - `2020_第2報/` — 2020年7月9日, 2,055 features (Polygon) ← 学習ラベルに使用予定
+  - `2023/` — 2023年7月10日, 1,266 features (MultiPolygon) ← テストラベルに使用予定
+
+#### ✅ Python環境構築
+- Python 3.12.3
+- インストール済みパッケージ:
+
+| パッケージ | バージョン | 用途 |
+|-----------|-----------|------|
+| geopandas | 1.1.3 | GeoJSON・空間演算 |
+| rasterio | 1.5.0 | ラスタ(DEM)処理 |
+| pysheds | 0.5 | TWI・流向・流域計算 |
+| xgboost | 3.2.0 | 予測モデル |
+| lightgbm | 4.6.0 | 予測モデル |
+| shap | 0.52.0 | 特徴重要度可視化 |
+| ripser | 0.6.12 | TDA計算 |
+| persim | 0.3.8 | Persistence Image変換 |
+| cfgrib | 0.9.15.1 | GRIB2雨量データ読み込み |
+| pyarrow | (最新) | Parquet読み書き |
+
+#### ✅ DEM前処理
+- 入力: 国土地理院 DEM5A GMLファイル 2,364枚
+- 処理内容:
+  1. `src/01_gml_to_geotiff.py` — GML(XML) → GeoTIFF変換（2,364タイル）
+  2. `src/02_merge_dem.py` — タイル結合 → `output/dem_merged.tif`
+  3. `src/03_create_mesh.py` — 500m×500mメッシュ作成 → `output/mesh_500m.gpkg`
+- 結果:
+  - DEMモザイク: 13,500 cols × 10,500 rows
+  - 範囲: 経度 130.25〜131.00°E, 緯度 32.92〜33.50°N
+  - 有効メッシュ数: **10,025セル**（有効ピクセル率30%以上）
+- 出力ファイル:
+  - `output/dem_merged.tif` — 統合DEM（5m解像度）
+  - `output/mesh_500m.gpkg` — 500mメッシュ（GeoPackage）
+  - `output/mesh_dem_stats.parquet` — 標高統計（elev_mean/min/max/std）
+
+---
+
+## ファイル構成
+
+```
+修論/
+├── progress.md              ← このファイル
+├── research_note.pdf        ← 研究ノート
+├── src/
+│   ├── 01_gml_to_geotiff.py
+│   ├── 02_merge_dem.py
+│   └── 03_create_mesh.py
+├── output/
+│   ├── dem_tiles/           ← GeoTIFFタイル (2364枚)
+│   ├── dem_merged.tif       ← 統合DEM
+│   ├── mesh_500m.gpkg       ← 500mメッシュ
+│   └── mesh_dem_stats.parquet
+├── DEM/                     ← 国土地理院 DEM5A GMLデータ
+├── 解析雨量データ/           ← 気象庁 解析雨量 GRIB2 (2020・2023)
+└── 浸水推定図/              ← 国土地理院 浸水推定図 GeoJSON
+    ├── 2020_第1報/
+    ├── 2020_第2報/
+    └── 2023/
+```
