@@ -138,7 +138,7 @@ def zonal_mean(raster_path: Path, mesh: gpd.GeoDataFrame,
     result = zonal_stats(mesh, str(raster_path), stats=stats,
                          nodata=-9999.0, all_touched=False)
     df = pd.DataFrame(result, index=mesh.index)
-    df.columns = [f"{prefix}_{s}" for s in stats]
+    df = df.rename(columns={s: f"{prefix}_{s}" for s in stats})
     return df
 
 

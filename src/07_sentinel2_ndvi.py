@@ -152,7 +152,8 @@ def calc_zonal(raster_path: Path, mesh: gpd.GeoDataFrame,
     result = zonal_stats(mesh, str(raster_path), stats=stats,
                          nodata=-9999.0, all_touched=False)
     df = pd.DataFrame(result, index=mesh.index)
-    df.columns = [f"{prefix}_{s}" for s in stats]
+    # dict キー名で rename（位置指定だと rasterstats の返す順序にズレが生じる）
+    df = df.rename(columns={s: f"{prefix}_{s}" for s in stats})
     return df
 
 
