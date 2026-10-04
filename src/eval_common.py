@@ -33,7 +33,7 @@ import numpy as np
 import pandas as pd
 import geopandas as gpd
 import xgboost as xgb
-from sklearn.metrics import (roc_auc_score, average_precision_score,
+from sklearn.metrics import (roc_auc_score, average_precision_score, f1_score,
                              precision_recall_curve,
                              precision_recall_fscore_support)
 from sklearn.model_selection import StratifiedGroupKFold
@@ -53,10 +53,23 @@ RAIN = ["rain_max1h", "rain_max3h", "rain_max6h", "rain_sum24h"]
 SAT  = ["ndvi_mean", "ndvi_min", "mndwi_mean", "mndwi_max"]
 TDA  = [f"h0_{i:03d}" for i in range(400)] + [f"h1_{i:03d}" for i in range(400)]
 TERRAIN = SINK + ELEV + TERR                     # 地形12次元（現行の強いベースライン）
+# 窪地単位の TDA 特徴（12_depression_features.py）。最後の3つは fill では出せない階層の特徴
+DEP  = ["dep_count", "dep_pers_max", "dep_pers_mean", "dep_volume_sum", "dep_volume_max",
+        "dep_area_sum", "dep_area_max", "dep_meandepth_max", "dep_width_min",
+        "dep_storage_depth", "dep_nest_depth", "dep_n_nested", "dep_volume_ratio"]
 
+# キー「地形12」「地形12+TDA」は 10b_robustness.py が名前で参照する（= Model A / A+PI）
 FEATURE_SETS = {
     "地形12":       TERRAIN,
     "地形12+TDA":   TERRAIN + TDA,
+}
+# 実験計画.md §5 のモデル定義（窪地特徴の計算後に使う）
+MODEL_SETS = {
+    "A":    TERRAIN,
+    "A+PI": TERRAIN + TDA,
+    "B":    DEP + TDA,
+    "C'":   TERRAIN + DEP,
+    "C":    TERRAIN + DEP + TDA,
 }
 
 EVENTS = ["2020", "2023"]
@@ -66,28 +79,45 @@ EVENTS = ["2020", "2023"]
 # データ
 # ------------------------------------------------------------------ #
 
-def load_dataset(block_km: float = 5.0) -> pd.DataFrame:
+def load_dataset(block_km: float = 5.0, inner_km: float | None = None) -> pd.DataFrame:
     """master_features + sink_features を結合し、空間ブロック ID を付ける
 
-    返り値は (mesh_id, event) 単位の縦持ち。block 列が空間ブロック ID。
+    返り値は (mesh_id, event) 単位の縦持ち。
+      block       … 外側（テスト用）の空間ブロック ID（block_km 四方）
+      block_inner … 内側（木の本数・閾値を決める内部CV用）のブロック ID（inner_km 四方。
+                    None なら block と同じ）
     """
     m = pd.read_parquet(OUT_DIR / "master_features.parquet")
     s = pd.read_parquet(OUT_DIR / "sink_features.parquet")
     d = m.merge(s, on="mesh_id", how="left")
+    dep = OUT_DIR / "depression_features.parquet"
+    if dep.exists():
+        d = d.merge(pd.read_parquet(dep), on="mesh_id", how="left")
     d["event"] = d["event"].astype(str)
-    return add_blocks(d, block_km)
+    return add_blocks(d, block_km, inner_km)
 
 
-def add_blocks(d: pd.DataFrame, block_km: float) -> pd.DataFrame:
-    """500m メッシュの行・列番号から block_km 四方のブロック ID を作る"""
+def add_blocks(d: pd.DataFrame, block_km: float,
+               inner_km: float | None = None) -> pd.DataFrame:
+    """500m メッシュの行・列番号から block_km 四方（と inner_km 四方）のブロック ID を作る
+
+    外側と内側を分けるのは、大きいブロック（10km で 41 個）では内部CVの検証フォールドが
+    数ブロックしかなく、木の本数の選択が不安定になるため（2026-10-03 頑健性確認）。
+    内側に小さいブロックを使って漏れがあっても影響するのは本数・閾値の選び方だけで、
+    テストの公正さは外側のブロックで保たれる。
+    """
     mesh = gpd.read_file(OUT_DIR / "mesh_500m.gpkg",
                          columns=["mesh_id", "mesh_row", "mesh_col"],
                          ignore_geometry=True)
-    n = int(round(block_km / 0.5))
-    mesh["block"] = (mesh["mesh_row"] // n).astype(str) + "_" + \
-                    (mesh["mesh_col"] // n).astype(str)
-    d = d.drop(columns=["block"], errors="ignore")
-    return d.merge(mesh[["mesh_id", "block"]], on="mesh_id", how="left")
+
+    def ids(km: float) -> pd.Series:
+        n = int(round(km / 0.5))
+        return (mesh["mesh_row"] // n).astype(str) + "_" + (mesh["mesh_col"] // n).astype(str)
+
+    mesh["block"] = ids(block_km)
+    mesh["block_inner"] = ids(inner_km) if inner_km else mesh["block"]
+    d = d.drop(columns=["block", "block_inner"], errors="ignore")
+    return d.merge(mesh[["mesh_id", "block", "block_inner"]], on="mesh_id", how="left")
 
 
 def static_table(d: pd.DataFrame) -> pd.DataFrame:
@@ -211,7 +241,7 @@ def eval_event(d: pd.DataFrame, feats: list, name: str, tr: str, te: str,
     """イベント間（旧設定）。早期打ち切り・閾値は訓練イベント内の空間ブロック検証で決める"""
     a = d[d["event"] == tr].reset_index(drop=True)
     b = d[d["event"] == te].reset_index(drop=True)
-    mdl, thr = fit_xgb(a[feats], a["label"].values, a["block"].values, seed)
+    mdl, thr = fit_xgb(a[feats], a["label"].values, a["block_inner"].values, seed)
     p = mdl.predict_proba(b[feats])[:, 1]
     sc = metrics(b["label"].values, p, thr)
     sc["n_trees"] = mdl.n_trees_
@@ -237,12 +267,13 @@ def eval_spatial(st: pd.DataFrame, feats: list, name: str, seed: int,
                  n_folds: int = 5) -> Result:
     """空間ブロック CV（静的感受性）。テストブロックの予測を集めて一括で指標化"""
     y, g = st["label"].values, st["block"].values
+    gi = st["block_inner"].values
     oof_p = np.full(len(st), np.nan)
     oof_pred = np.zeros(len(st), dtype=int)
     n_trees = []
     for tr_idx, te_idx in spatial_folds(g, y, seed, n_folds):
         a = st.iloc[tr_idx]
-        mdl, thr = fit_xgb(a[feats], y[tr_idx], g[tr_idx], seed)
+        mdl, thr = fit_xgb(a[feats], y[tr_idx], gi[tr_idx], seed)
         n_trees.append(mdl.n_trees_)
         p = mdl.predict_proba(st.iloc[te_idx][feats])[:, 1]
         oof_p[te_idx] = p
@@ -264,6 +295,7 @@ def eval_sp_event(d: pd.DataFrame, feats_by_name: dict, tr: str, te: str,
     a = d[d["event"] == tr].set_index("mesh_id")
     b = d[d["event"] == te].set_index("mesh_id").loc[a.index]
     y_tr, y_te, g = a["label"].values, b["label"].values, a["block"].values
+    gi = a["block_inner"].values
     folds = spatial_folds(g, y_tr, seed, n_folds)
 
     out = []
@@ -272,7 +304,7 @@ def eval_sp_event(d: pd.DataFrame, feats_by_name: dict, tr: str, te: str,
         oof_pred = np.zeros(len(a), dtype=int)
         n_trees = []
         for tr_idx, te_idx in folds:
-            mdl, thr = fit_xgb(a.iloc[tr_idx][feats], y_tr[tr_idx], g[tr_idx], seed)
+            mdl, thr = fit_xgb(a.iloc[tr_idx][feats], y_tr[tr_idx], gi[tr_idx], seed)
             n_trees.append(mdl.n_trees_)
             p = mdl.predict_proba(b.iloc[te_idx][feats])[:, 1]
             oof_p[te_idx] = p
@@ -335,3 +367,60 @@ def summarize(res: pd.DataFrame,
     for c in cols:
         out[c] = [f"{m:.3f}±{s:.3f}" for m, s in zip(mean[c], sd[c])]
     return out.reset_index()
+
+
+def block_bootstrap(preds: pd.DataFrame, base: str, plus: str, n_boot: int = 1000,
+                    seed: int = 0) -> pd.DataFrame:
+    """(setting, direction) ごとに、空間ブロックの復元抽出で (plus − base) の差の分布を出す
+
+    テスト予測（全メッシュの out-of-fold 予測）を固定し、ブロックを復元抽出して
+    PR-AUC・F1 の差を再計算する。差はシードごとに計算してシード平均をとる。
+    モデルの再学習はしない（どのブロックがテストに来たかの偶然性のみを見る）。
+    preds は run_all(..., return_preds=True) の2つ目の返り値。
+    """
+    rng = np.random.default_rng(seed)
+    rows = []
+    preds = preds[preds["model"].isin([base, plus])]
+    for (s, dr), g in preds.groupby(["setting", "direction"], sort=False):
+        seeds = sorted(g["seed"].unique())
+        # シードごとに base / plus の予測を同じメッシュ順で並べる
+        ref = g[(g["model"] == base) & (g["seed"] == seeds[0])].sort_values("mesh_id")
+        mesh = ref["mesh_id"].values
+        y = ref["y"].values
+        blocks = ref["block"].values
+        P = {}
+        for sd in seeds:
+            for m in (base, plus):
+                x = g[(g["model"] == m) & (g["seed"] == sd)].set_index("mesh_id").loc[mesh]
+                P[(sd, m)] = (x["p"].values, x["pred"].values)
+
+        ub, inv = np.unique(blocks, return_inverse=True)
+        members = [np.flatnonzero(inv == k) for k in range(len(ub))]
+
+        def diffs(idx):
+            dpr, df1 = [], []
+            for sd in seeds:
+                (pb, cb), (pp, cp) = P[(sd, base)], P[(sd, plus)]
+                dpr.append(average_precision_score(y[idx], pp[idx])
+                           - average_precision_score(y[idx], pb[idx]))
+                df1.append(f1_score(y[idx], cp[idx], zero_division=0)
+                           - f1_score(y[idx], cb[idx], zero_division=0))
+            return np.mean(dpr), np.mean(df1)
+
+        obs_pr, obs_f1 = diffs(np.arange(len(y)))
+        boot = np.empty((n_boot, 2))
+        for b in range(n_boot):
+            pick = rng.integers(0, len(ub), len(ub))
+            idx = np.concatenate([members[k] for k in pick])
+            if y[idx].sum() == 0:
+                boot[b] = np.nan
+                continue
+            boot[b] = diffs(idx)
+        boot = boot[~np.isnan(boot[:, 0])]
+        for j, (name, obs) in enumerate([("PR-AUC", obs_pr), ("F1", obs_f1)]):
+            lo, hi = np.percentile(boot[:, j], [2.5, 97.5])
+            rows.append({"setting": s, "direction": dr, "metric": name,
+                         "diff": f"{obs:+.3f}", "95%CI": f"[{lo:+.3f}, {hi:+.3f}]",
+                         "P(差≤0)": f"{(boot[:, j] <= 0).mean():.3f}",
+                         "n_blocks": len(ub)})
+    return pd.DataFrame(rows)

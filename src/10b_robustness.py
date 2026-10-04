@@ -22,6 +22,8 @@
   output/robust_b{km}.parquet       … シード別の指標
   output/robust_b{km}_preds.parquet … メッシュ別の予測
   output/robust_results.txt         … まとめ（ブロックごとに追記）
+  --inner-km を付けた場合は、ファイル名の末尾に _in{km} が付く（例: robust_results_in5.txt）
+  （内部CVだけ小さいブロックにする。10km 外側では内部CVが不安定になったため。eval_common.add_blocks 参照）
 """
 
 import argparse
@@ -30,66 +32,12 @@ import time
 import warnings
 from pathlib import Path
 
-import numpy as np
-import pandas as pd
-from sklearn.metrics import average_precision_score, f1_score
-
 sys.path.insert(0, str(Path(__file__).parent))
 import eval_common as ec  # noqa: E402
 
 warnings.filterwarnings("ignore")
 
 BASE, PLUS = "地形12", "地形12+TDA"
-OUT_TXT = ec.OUT_DIR / "robust_results.txt"
-
-
-def block_bootstrap(preds: pd.DataFrame, n_boot: int, seed: int = 0) -> pd.DataFrame:
-    """(setting, direction) ごとに、ブロック復元抽出で TDA の差の分布を出す"""
-    rng = np.random.default_rng(seed)
-    rows = []
-    for (s, dr), g in preds.groupby(["setting", "direction"], sort=False):
-        seeds = sorted(g["seed"].unique())
-        # シードごとに base / plus の予測を同じメッシュ順で並べる
-        ref = g[(g["model"] == BASE) & (g["seed"] == seeds[0])].sort_values("mesh_id")
-        mesh = ref["mesh_id"].values
-        y = ref["y"].values
-        blocks = ref["block"].values
-        P = {}
-        for sd in seeds:
-            for m in (BASE, PLUS):
-                x = g[(g["model"] == m) & (g["seed"] == sd)].set_index("mesh_id").loc[mesh]
-                P[(sd, m)] = (x["p"].values, x["pred"].values)
-
-        ub, inv = np.unique(blocks, return_inverse=True)
-        members = [np.flatnonzero(inv == k) for k in range(len(ub))]
-
-        def diffs(idx):
-            dpr, df1 = [], []
-            for sd in seeds:
-                (pb, cb), (pp, cp) = P[(sd, BASE)], P[(sd, PLUS)]
-                dpr.append(average_precision_score(y[idx], pp[idx])
-                           - average_precision_score(y[idx], pb[idx]))
-                df1.append(f1_score(y[idx], cp[idx], zero_division=0)
-                           - f1_score(y[idx], cb[idx], zero_division=0))
-            return np.mean(dpr), np.mean(df1)
-
-        obs_pr, obs_f1 = diffs(np.arange(len(y)))
-        boot = np.empty((n_boot, 2))
-        for b in range(n_boot):
-            pick = rng.integers(0, len(ub), len(ub))
-            idx = np.concatenate([members[k] for k in pick])
-            if y[idx].sum() == 0:
-                boot[b] = np.nan
-                continue
-            boot[b] = diffs(idx)
-        boot = boot[~np.isnan(boot[:, 0])]
-        for j, (name, obs) in enumerate([("PR-AUC", obs_pr), ("F1", obs_f1)]):
-            lo, hi = np.percentile(boot[:, j], [2.5, 97.5])
-            rows.append({"setting": s, "direction": dr, "metric": name,
-                         "diff": f"{obs:+.3f}", "95%CI": f"[{lo:+.3f}, {hi:+.3f}]",
-                         "P(差≤0)": f"{(boot[:, j] <= 0).mean():.3f}",
-                         "n_blocks": len(ub)})
-    return pd.DataFrame(rows)
 
 
 def main() -> None:
@@ -98,13 +46,19 @@ def main() -> None:
     ap.add_argument("--max-trees", type=int, default=600)
     ap.add_argument("--seeds", type=int, default=5)
     ap.add_argument("--n-boot", type=int, default=1000)
+    ap.add_argument("--inner-km", type=float, default=None,
+                    help="内部CVのブロックの大きさ。省略時は外側と同じ")
     args = ap.parse_args()
 
     ec.MAX_TREES = args.max_trees
     feature_sets = {BASE: ec.FEATURE_SETS[BASE], PLUS: ec.FEATURE_SETS[PLUS]}
+    # 内側を分けた実行は別ファイルに出す（既存の結果を上書きしない）
+    sfx = f"_in{args.inner_km:g}".replace(".", "p") if args.inner_km else ""
+    out_txt = ec.OUT_DIR / f"robust_results{sfx}.txt"
 
-    with open(OUT_TXT, "w", encoding="utf-8") as f:
+    with open(out_txt, "w", encoding="utf-8") as f:
         f.write("===== 頑健性確認：地形12 vs 地形12+TDA =====\n")
+        f.write(f"内部CVのブロック: {args.inner_km or '外側と同じ'} km\n")
         f.write(f"木の上限 {args.max_trees} 本 / シード {args.seeds} / "
                 f"ブートストラップ {args.n_boot} 回 / 設定 spatial・sp_event\n")
         f.write("比較用 v2（5km・上限300本）: output/eval_results.txt\n\n")
@@ -112,25 +66,25 @@ def main() -> None:
     for km in args.blocks:
         t0 = time.time()
         print(f"=== ブロック {km} km ===", flush=True)
-        d = ec.load_dataset(km)
+        d = ec.load_dataset(km, args.inner_km)
         res, preds = ec.run_all(d, feature_sets, seeds=range(args.seeds),
                                 settings=("spatial", "sp_event"),
                                 log=lambda s: print(s, flush=True), return_preds=True)
-        tag = f"{km:g}".replace(".", "p")
+        tag = f"{km:g}".replace(".", "p") + sfx
         res.to_parquet(ec.OUT_DIR / f"robust_b{tag}.parquet", index=False)
         preds.to_parquet(ec.OUT_DIR / f"robust_b{tag}_preds.parquet", index=False)
 
-        boot = block_bootstrap(preds[preds["model"].isin([BASE, PLUS])], args.n_boot)
+        boot = ec.block_bootstrap(preds, BASE, PLUS, args.n_boot)
         txt = [f"--- ブロック {km} km（{d['block'].nunique()} ブロック、"
                f"{(time.time() - t0) / 60:.0f} 分） ---",
                ec.summarize(res).to_string(index=False), "",
                "TDA の差（シード平均）とブロック・ブートストラップの 95% 信頼区間",
                boot.to_string(index=False), "", ""]
-        with open(OUT_TXT, "a", encoding="utf-8") as f:
+        with open(out_txt, "a", encoding="utf-8") as f:
             f.write("\n".join(txt))
         print("\n".join(txt), flush=True)
 
-    print(f"保存: {OUT_TXT}", flush=True)
+    print(f"保存: {out_txt}", flush=True)
 
 
 if __name__ == "__main__":
