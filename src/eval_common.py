@@ -52,6 +52,8 @@ SINK = ["sink_area_frac", "sink_storage_depth", "sink_depth_max",
 RAIN = ["rain_max1h", "rain_max3h", "rain_max6h", "rain_sum24h"]
 SAT  = ["ndvi_mean", "ndvi_min", "mndwi_mean", "mndwi_max"]
 TDA  = [f"h0_{i:03d}" for i in range(400)] + [f"h1_{i:03d}" for i in range(400)]
+# バッファ付きパッチで計算し直した PI（08b_tda_buffered.py、パッチ境界の修正版）
+TDA_B = [f"h0b_{i:03d}" for i in range(400)] + [f"h1b_{i:03d}" for i in range(400)]
 TERRAIN = SINK + ELEV + TERR                     # 地形12次元（現行の強いベースライン）
 # 窪地単位の TDA 特徴（12_depression_features.py）。最後の3つは fill では出せない階層の特徴
 DEP  = ["dep_count", "dep_pers_max", "dep_pers_mean", "dep_volume_sum", "dep_volume_max",
@@ -70,6 +72,10 @@ MODEL_SETS = {
     "B":    DEP + TDA,
     "C'":   TERRAIN + DEP,
     "C":    TERRAIN + DEP + TDA,
+    # パッチ境界を修正した PI 版
+    "A+PIb": TERRAIN + TDA_B,
+    "Cb":    TERRAIN + DEP + TDA_B,
+    "Bb":    DEP + TDA_B,
 }
 
 EVENTS = ["2020", "2023"]
@@ -93,6 +99,9 @@ def load_dataset(block_km: float = 5.0, inner_km: float | None = None) -> pd.Dat
     dep = OUT_DIR / "depression_features.parquet"
     if dep.exists():
         d = d.merge(pd.read_parquet(dep), on="mesh_id", how="left")
+    tb = OUT_DIR / "tda_buffered_features.parquet"
+    if tb.exists():
+        d = d.merge(pd.read_parquet(tb), on="mesh_id", how="left")
     d["event"] = d["event"].astype(str)
     return add_blocks(d, block_km, inner_km)
 
