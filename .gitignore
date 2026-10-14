@@ -2,7 +2,8 @@
 DEM/
 解析雨量データ/
 浸水推定図/*.zip
-# Model D の入力（国土数値情報・地理院タイル。14a_download_landform.py と README 記載の URL で再取得できる）
+# Model D の入力（再取得できる）。地形分類は 14a_download_landform.py、
+# 土地利用は国土数値情報 L03-b-16_{4930,4931,5030,5031}-jgd_GML.zip（progress.md 2026-10-07）
 土地利用/
 地形分類/
 
