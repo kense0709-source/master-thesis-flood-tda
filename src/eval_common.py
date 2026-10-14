@@ -61,6 +61,11 @@ TERRAIN = SINK + ELEV + TERR                     # 地形12次元（現行の強
 DEP  = ["dep_count", "dep_pers_max", "dep_pers_mean", "dep_volume_sum", "dep_volume_max",
         "dep_area_sum", "dep_area_max", "dep_meandepth_max", "dep_width_min",
         "dep_storage_depth", "dep_nest_depth", "dep_n_nested", "dep_volume_ratio"]
+# 土地利用・地形分類の面積率（14_landuse.py）。Model D 用。
+# 流域にほぼない地形（後背低地・河川敷・凹地。平均面積率 0.001 以下）は除く
+LU   = ["lu_paddy", "lu_farm", "lu_forest", "lu_building", "lu_transport", "lu_water", "lu_other"]
+LF   = ["lf_mountain", "lf_terrace", "lf_fan", "lf_levee", "lf_floodplain", "lf_oldchannel",
+        "lf_water", "lf_fill", "lf_cut", "lf_reclaim", "lf_covered"]
 
 # キー「地形12」「地形12+TDA」は 10b_robustness.py が名前で参照する（= Model A / A+PI）
 FEATURE_SETS = {
@@ -79,6 +84,11 @@ MODEL_SETS = {
     "Cb":    TERRAIN + DEP + TDA_B,
     "Bb":    DEP + TDA_B,
     "A+PIl": TERRAIN + TDA_L,
+    # Model D：土地利用・地形分類を足したうえで TDA がまだ効くか（D vs D0 が本題）。
+    # PI は境界を直したバッファ付き版を使う（旧 PI は境界の偽ペアを含むため。method_choices.md ステップ9）
+    "D0":   TERRAIN + LU + LF,
+    "D'":   TERRAIN + LU + LF + DEP,
+    "D":    TERRAIN + LU + LF + TDA_B,
 }
 
 EVENTS = ["2020", "2023"]
@@ -102,7 +112,8 @@ def load_dataset(block_km: float = 5.0, inner_km: float | None = None) -> pd.Dat
     dep = OUT_DIR / "depression_features.parquet"
     if dep.exists():
         d = d.merge(pd.read_parquet(dep), on="mesh_id", how="left")
-    for name in ("tda_buffered_features.parquet", "tda_log_features.parquet"):
+    for name in ("tda_buffered_features.parquet", "tda_log_features.parquet",
+                 "landuse_features.parquet"):
         f = OUT_DIR / name
         if f.exists():
             d = d.merge(pd.read_parquet(f), on="mesh_id", how="left")

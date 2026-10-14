@@ -2,6 +2,9 @@
 DEM/
 解析雨量データ/
 浸水推定図/*.zip
+# Model D の入力（国土数値情報・地理院タイル。14a_download_landform.py と README 記載の URL で再取得できる）
+土地利用/
+地形分類/
 
 # 出力ファイル（再生成可能なもの）
 output/dem_tiles/
